@@ -20,3 +20,8 @@ mp4parse = "0.8"
 ogg      = "0.5.1"
 time     = "0.1"
 walkdir  = "1.0"
+criterion = "0.2"
+
+[[bench]]
+name = "testsamples"
+harness = false
