@@ -609,37 +609,17 @@ pub struct FrameReader<R: ReadBytes> {
 pub type FrameResult = Result<Option<Block>>;
 
 /// A function to expand the length of a buffer, or replace the buffer altogether,
-/// so it can hold at least `new_len` elements. The contents of the buffer can
-/// be anything, it is assumed they will be overwritten anyway.
-///
-/// To use this function safely, the caller must overwrite all `new_len` bytes.
-unsafe fn ensure_buffer_len(mut buffer: Vec<i32>, new_len: usize) -> Vec<i32> {
-    if buffer.len() < new_len {
-        // Previous data will be overwritten, so instead of resizing the
-        // vector if it is too small, we might as well allocate a new one.
-        if buffer.capacity() < new_len {
-            buffer = Vec::with_capacity(new_len);
-        }
-
-        // We are going to fill the buffer anyway, so there is no point in
-        // initializing it with default values. This does mean that there could
-        // be garbage in the buffer, therefore this function is unsafe.
-        buffer.set_len(new_len);
+/// so it can hold at least `new_capacity` elements without reallocating.
+/// The length of returned buffer is guaranteed to be zero.
+fn ensure_buffer_capacity(mut buffer: Vec<i32>, new_capacity: usize) -> Vec<i32> {
+    // Previous data will be overwritten, so instead of resizing the
+    // vector if it is too small, we might as well allocate a new one.
+    if buffer.capacity() < new_capacity {
+        buffer = Vec::with_capacity(new_capacity);
     } else {
-        buffer.truncate(new_len);
+        buffer.truncate(0);
     }
     buffer
-}
-
-#[test]
-fn ensure_buffer_len_returns_buffer_with_new_len() {
-    for capacity in 0..10 {
-        for new_len in 0..10 {
-            let buffer = Vec::with_capacity(capacity);
-            let resized = unsafe { ensure_buffer_len(buffer, new_len) };
-            assert_eq!(resized.len(), new_len);
-        }
-    }
 }
 
 impl<R: ReadBytes> FrameReader<R> {
@@ -675,10 +655,8 @@ impl<R: ReadBytes> FrameReader<R> {
         // decoded.
         let total_samples = header.channels() as usize * header.block_size as usize;
 
-        // Ensure the buffer is the right size to hold all samples, potentially
-        // allocating a new buffer without initializing the memory. From here
-        // on, we must be careful to overwrite each byte in the buffer.
-        buffer = unsafe { ensure_buffer_len(buffer, total_samples) };
+        // Ensure the buffer is the right capacity to hold all samples
+        buffer = ensure_buffer_capacity(buffer, total_samples);
 
         let bps = match header.bits_per_sample {
             Some(x) => x,
@@ -696,44 +674,42 @@ impl<R: ReadBytes> FrameReader<R> {
         // we need a bitstream. Then we can decode subframes from the bitstream.
         {
             let mut bitstream = Bitstream::new(&mut crc_input);
-            let bs = header.block_size as usize;
+            let bs = header.block_size;
 
             match header.channel_assignment {
                 ChannelAssignment::Independent(n_ch) => {
-                    for ch in 0..n_ch as usize {
-                        try!(subframe::decode(&mut bitstream,
-                                              bps,
-                                              &mut buffer[ch * bs..(ch + 1) * bs]));
+                    for _ch in 0..n_ch {
+                        try!(subframe::decode(&mut bitstream, bps, &mut buffer, bs));
                     }
+                    debug_assert_eq!(buffer.len(), bs as usize * n_ch as usize);
                 }
                 ChannelAssignment::LeftSideStereo => {
                     // The side channel has one extra bit per sample.
-                    try!(subframe::decode(&mut bitstream, bps, &mut buffer[..bs]));
-                    try!(subframe::decode(&mut bitstream,
-                                          bps + 1,
-                                          &mut buffer[bs..bs * 2]));
+                    try!(subframe::decode(&mut bitstream, bps, &mut buffer, bs));
+                    try!(subframe::decode(&mut bitstream, bps + 1, &mut buffer, bs));
+                    debug_assert_eq!(buffer.len(), bs as usize * 2);
 
                     // Then decode the side channel into the right channel.
-                    decode_left_side(&mut buffer[..bs * 2]);
+                    decode_left_side(&mut buffer.as_mut_slice());
                 }
                 ChannelAssignment::RightSideStereo => {
                     // The side channel has one extra bit per sample.
-                    try!(subframe::decode(&mut bitstream, bps + 1, &mut buffer[..bs]));
-                    try!(subframe::decode(&mut bitstream, bps, &mut buffer[bs..bs * 2]));
+                    try!(subframe::decode(&mut bitstream, bps + 1, &mut buffer, bs));
+                    try!(subframe::decode(&mut bitstream, bps, &mut buffer, bs));
+                    debug_assert_eq!(buffer.len(), bs as usize * 2);
 
                     // Then decode the side channel into the left channel.
-                    decode_right_side(&mut buffer[..bs * 2]);
+                    decode_right_side(buffer.as_mut_slice());
                 }
                 ChannelAssignment::MidSideStereo => {
                     // Decode mid as the first channel, then side with one
                     // extra bitp per sample.
-                    try!(subframe::decode(&mut bitstream, bps, &mut buffer[..bs]));
-                    try!(subframe::decode(&mut bitstream,
-                                          bps + 1,
-                                          &mut buffer[bs..bs * 2]));
+                    try!(subframe::decode(&mut bitstream, bps, &mut buffer, bs));
+                    try!(subframe::decode(&mut bitstream, bps + 1, &mut buffer, bs));
+                    debug_assert_eq!(buffer.len(), bs as usize * 2);
 
                     // Then decode mid-side channel into left-right.
-                    decode_mid_side(&mut buffer[..bs * 2]);
+                    decode_mid_side(&mut buffer.as_mut_slice());
                 }
             }
 
